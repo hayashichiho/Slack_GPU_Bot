@@ -7,6 +7,7 @@ import csv
 import io
 import os
 import re
+import socket
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -16,6 +17,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 
 COMMAND_TIMEOUT_SECONDS = 10
+SSH_CONNECT_TIMEOUT_SECONDS = 5
 
 
 @dataclass
@@ -41,6 +43,50 @@ def run_command(command: list[str]) -> str:
     return result.stdout.strip()
 
 
+def run_server_command(command: list[str], ssh_target: str | None = None) -> str:
+    """Run a command locally, or remotely over non-interactive SSH."""
+    if ssh_target is None:
+        return run_command(command)
+
+    ssh_key = os.path.expanduser(
+        os.environ.get("GPU_SSH_KEY", "~/.ssh/gpu_bot_ed25519")
+    )
+    return run_command(
+        [
+            "ssh",
+            "-i",
+            ssh_key,
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            f"ConnectTimeout={SSH_CONNECT_TIMEOUT_SECONDS}",
+            ssh_target,
+            *command,
+        ]
+    )
+
+
+def configured_servers() -> list[tuple[str, str | None]]:
+    """Return local server plus optional label=ssh-target entries from .env."""
+    local_name = os.environ.get("SERVER_NAME", socket.gethostname())
+    servers: list[tuple[str, str | None]] = [(local_name, None)]
+
+    raw_servers = os.environ.get("REMOTE_GPU_SERVERS", "")
+    for entry in raw_servers.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "=" in entry:
+            label, ssh_target = entry.split("=", 1)
+        else:
+            label = ssh_target = entry
+        label = label.strip()
+        ssh_target = ssh_target.strip()
+        if label and ssh_target:
+            servers.append((label, ssh_target))
+    return servers
+
+
 def parse_csv(text: str) -> list[list[str]]:
     if not text:
         return []
@@ -51,23 +97,27 @@ def parse_csv(text: str) -> list[list[str]]:
     ]
 
 
-def linux_user_for_pid(pid: str) -> str | None:
+def linux_user_for_pid(pid: str, ssh_target: str | None = None) -> str | None:
     """Resolve a process ID to its Linux user without exposing command lines."""
     try:
-        user = run_command(["ps", "-o", "user=", "-p", pid]).strip()
+        user = run_server_command(
+            ["ps", "-o", "user=", "-p", pid],
+            ssh_target,
+        ).strip()
         return user or None
     except (subprocess.SubprocessError, OSError):
         return None
 
 
-def read_gpu_status() -> list[GPU]:
+def read_gpu_status(ssh_target: str | None = None) -> list[GPU]:
     gpu_rows = parse_csv(
-        run_command(
+        run_server_command(
             [
                 "nvidia-smi",
                 "--query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total",
                 "--format=csv,noheader,nounits",
-            ]
+            ],
+            ssh_target,
         )
     )
 
@@ -89,12 +139,13 @@ def read_gpu_status() -> list[GPU]:
 
     try:
         process_rows = parse_csv(
-            run_command(
+            run_server_command(
                 [
                     "nvidia-smi",
                     "--query-compute-apps=gpu_uuid,pid",
                     "--format=csv,noheader,nounits",
-                ]
+                ],
+                ssh_target,
             )
         )
     except subprocess.CalledProcessError:
@@ -105,7 +156,7 @@ def read_gpu_status() -> list[GPU]:
             continue
         gpu_uuid, pid = row
         gpu = by_uuid.get(gpu_uuid)
-        user = linux_user_for_pid(pid)
+        user = linux_user_for_pid(pid, ssh_target)
         if gpu is not None and user:
             gpu.users.add(user)
 
@@ -121,24 +172,33 @@ def status_icon(gpu: GPU) -> str:
 
 
 def build_message() -> str:
-    gpus = read_gpu_status()
-    if not gpus:
-        return "⚠️ GPU情報を取得できませんでした。"
-
     lines = [
         f"*🖥 GPUサーバー状況*　{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "",
     ]
-    for gpu in gpus:
-        users = ", ".join(sorted(gpu.users)) if gpu.users else "なし"
-        lines.extend(
-            [
-                f"*GPU {gpu.index}* {status_icon(gpu)}　{gpu.name}",
-                f"使用率：{gpu.utilization}%　メモリ：{gpu.memory_used} / {gpu.memory_total} MiB",
-                f"利用者：{users}",
-                "",
-            ]
-        )
+
+    for server_name, ssh_target in configured_servers():
+        lines.extend([f"*―― {server_name} ――*", ""])
+        try:
+            gpus = read_gpu_status(ssh_target)
+        except (subprocess.SubprocessError, OSError, ValueError):
+            lines.extend(["⚠️ GPU情報を取得できませんでした。", ""])
+            continue
+
+        if not gpus:
+            lines.extend(["⚠️ GPUが見つかりませんでした。", ""])
+            continue
+
+        for gpu in gpus:
+            users = ", ".join(sorted(gpu.users)) if gpu.users else "なし"
+            lines.extend(
+                [
+                    f"*GPU {gpu.index}* {status_icon(gpu)}　{gpu.name}",
+                    f"使用率：{gpu.utilization}%　メモリ：{gpu.memory_used} / {gpu.memory_total} MiB",
+                    f"利用者：{users}",
+                    "",
+                ]
+            )
     return "\n".join(lines).rstrip()
 
 

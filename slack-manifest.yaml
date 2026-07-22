@@ -1,12 +1,12 @@
 _metadata:
   major_version: 1
 display_information:
-  name: お掃除Bot
+  name: GPU状況Bot
   description: 計算機サーバーのGPU使用状況を回答します
   background_color: "#2c2d30"
 features:
   bot_user:
-    display_name: お掃除Bot
+    display_name: GPU状況Bot
     always_online: false
 oauth_config:
   scopes:
