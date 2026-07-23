@@ -1,13 +1,15 @@
 # Slack GPU Status Bot
 
-Slackチャンネルに `状況` と投稿すると、Botを動かしているLinuxサーバーのNVIDIA GPU使用状況を返信します。
+SlackのチャンネルまたはApp Homeから、1台以上のLinuxサーバーに搭載されたNVIDIA GPUの使用状況を確認するBotです。
 
 ## 主な機能
 
 - GPU番号、機種名、使用率、メモリ使用量を表示
 - GPUを使用しているLinuxユーザー名を表示
+- ローカルサーバーに加えて、SSH接続できる複数のGPUサーバーを一覧表示
 - `状況`、`状況！`、`状況？`に反応
 - Botへのメンションにも反応
+- App Homeの「GPU状況を確認」ボタンから確認可能
 - SlackのSocket Modeを使用するため、サーバーのポート公開は不要
 - GPUの予約や割り当ては行わず、状態の可視化だけを行う
 
@@ -15,6 +17,8 @@ Slackチャンネルに `状況` と投稿すると、Botを動かしているLi
 
 ```text
 🖥 GPUサーバー状況　2026-07-21 14:20:44
+
+―― archimedes ――
 
 GPU 0 🔴　NVIDIA RTX A6000
 使用率：96%　メモリ：6090 / 49140 MiB
@@ -28,13 +32,15 @@ GPU 1 🟢　NVIDIA RTX A6000
 ## 構成
 
 ```text
-Slackで「状況」と投稿
-        ↓
-Socket ModeでBotが受信
-        ↓
-サーバー上でnvidia-smiを実行
-        ↓
-結果をSlackへ返信
+Slackで「状況」と投稿 / App Homeのボタンを押す
+                    ↓
+             Socket Modeで受信
+                    ↓
+       ローカルまたはSSH経由で接続
+                    ↓
+          nvidia-smiとpsを実行
+                    ↓
+          GPU状況をSlackへ表示
 ```
 
 ## 前提条件
@@ -42,6 +48,7 @@ Socket ModeでBotが受信
 - Linuxサーバーへログインできる
 - `nvidia-smi`が実行できる
 - Python 3が利用できる
+- リモートサーバーも表示する場合は、Bot実行ユーザーが公開鍵認証でSSH接続できる
 - サーバーから`https://slack.com`へ通信できる
 - Slackワークスペースへカスタムアプリを追加できる
 
@@ -54,7 +61,8 @@ Socket ModeでBotが受信
 | `gpu_bot.py` | Bot本体 |
 | `requirements.txt` | Python依存パッケージ |
 | `slack-manifest.yaml` | 新規Slack App作成用の任意ファイル |
-| `.env` | 各自で作成するトークン設定。配布物には含まれない |
+| `.env.example` | 環境変数の設定例 |
+| `.env` | 各自で作成する実際の設定。Git管理対象外 |
 
 ## 1. Slack Appを用意する
 
@@ -108,11 +116,19 @@ Socket ModeでBotが受信
 
 | 用途 | Bot Event |
 | --- | --- |
+| App Home | `app_home_opened` |
 | 公開チャンネル | `message.channels` |
 | Botへのメンション | `app_mention` |
 | 非公開チャンネル | `message.groups` |
 | BotとのDM | `message.im` |
 | グループDM | `message.mpim` |
+
+### App HomeとInteractivity
+
+1. `App Home`を開き、`Home Tab`を有効にします。
+2. `Interactivity & Shortcuts`を開き、Interactivityを有効にします。
+
+Socket Modeを使用するため、Request URLの公開は不要です。付属の`slack-manifest.yaml`から新規作成した場合、これらは設定済みです。
 
 ### ワークスペースへインストール
 
@@ -170,11 +186,17 @@ Botのディレクトリで`.env`を作成します。
 nano .env
 ```
 
-以下の2行を記述します。
+最低限、以下の2行を記述します。
 
 ```bash
 export SLACK_BOT_TOKEN='xoxb-実際のBotトークン'
 export SLACK_APP_TOKEN='xapp-実際のAppトークン'
+```
+
+表示名を指定する場合は、次の行も追加します。省略時はホスト名が使われます。
+
+```bash
+export SERVER_NAME='archimedes'
 ```
 
 `nano`では`Ctrl+O`、`Enter`、`Ctrl+X`の順に押すと保存して終了できます。
@@ -203,7 +225,26 @@ stat -c '%a %n' .env
 .env
 ```
 
-## 6. 通常起動で動作確認する
+## 6. リモートGPUサーバーを追加する（任意）
+
+Botを動かすサーバー以外も表示する場合、パスフレーズ入力なしで利用できるBot専用のSSH鍵を用意し、対象サーバーへ公開鍵を登録します。BotはSSH先で`nvidia-smi`と`ps`だけを実行します。
+
+`.env`へ、`表示名=SSH接続先`の形式で追加します。複数台はカンマで区切ります。
+
+```bash
+export REMOTE_GPU_SERVERS='newton=hayashi@newton,gauss=hayashi@gauss'
+export GPU_SSH_KEY='~/.ssh/gpu_bot_ed25519'
+```
+
+`GPU_SSH_KEY`を省略した場合は`~/.ssh/gpu_bot_ed25519`を使用します。起動前に非対話モードで接続できることを確認してください。
+
+```bash
+ssh -i ~/.ssh/gpu_bot_ed25519 -o BatchMode=yes hayashi@newton nvidia-smi
+```
+
+リモートサーバーを使わない場合、`REMOTE_GPU_SERVERS`と`GPU_SSH_KEY`は不要です。
+
+## 7. 通常起動で動作確認する
 
 ```bash
 source .venv/bin/activate
@@ -232,7 +273,9 @@ Slackの対象チャンネルで次のように投稿します。
 
 GPU情報が返信されれば成功です。動作確認後、`Ctrl+C`で一度終了します。
 
-## 7. tmuxで継続稼働する
+App Homeを有効にした場合は、Slackの`Apps`からBotを開き、「GPU状況を確認」ボタンでも確認できます。
+
+## 8. tmuxで継続稼働する
 
 tmuxセッションを作成します。
 
@@ -328,6 +371,20 @@ source .env
 - 非公開チャンネルでは`groups:history`と`message.groups`を確認します。
 - 権限変更後に`Reinstall to Workspace`を行ったか確認します。
 
+### App Homeにボタンが表示されない
+
+- `App Home`で`Home Tab`が有効か確認します。
+- `Event Subscriptions`に`app_home_opened`があるか確認します。
+- `Interactivity & Shortcuts`が有効か確認します。
+- Manifestや権限を変更した後は、Appを再インストールしてBotを再起動します。
+
+### リモートサーバーのGPU情報を取得できない
+
+- `.env`の`REMOTE_GPU_SERVERS`が`表示名=ユーザー@ホスト`形式か確認します。
+- `GPU_SSH_KEY`のパスとファイル権限を確認します。
+- Bot実行ユーザーで`ssh -o BatchMode=yes 接続先 nvidia-smi`が成功するか確認します。
+- 初回接続時のホスト鍵確認が残っている場合は、事前に手動接続して確認します。
+
 ### 利用者が「なし」になる
 
 別ユーザーのPID情報を参照できない環境や、`nvidia-smi`のCompute Appsに現れない処理では、利用者を取得できない場合があります。GPU使用率とメモリ量はそのまま表示されます。
@@ -341,4 +398,5 @@ tmuxは以前の画面を保存しています。`GNU nano`が表示された場
 - GPUの予約、排他制御、ジョブキュー管理は行いません。
 - `nvidia-smi`に表示されない処理は検出できません。
 - CPUのみを使う処理は表示しません。
+- SSH接続に失敗したサーバーは、GPU情報を取得できなかった旨だけを表示します。
 - Botを停止している間はSlackへ回答できません。
