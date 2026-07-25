@@ -275,41 +275,76 @@ GPU情報が返信されれば成功です。動作確認後、`Ctrl+C`で一度
 
 App Homeを有効にした場合は、Slackの`Apps`からBotを開き、「GPU状況を確認」ボタンでも確認できます。
 
-## 8. tmuxで継続稼働する
+## 8. cronで再起動後に自動起動する
 
-tmuxセッションを作成します。
+管理者権限がなくsystemdサービスを登録できない場合は、ユーザーのcrontabへ`@reboot`ジョブを登録できます。cronから起動するBotはSSHのログインセッションから独立して動作します。
 
-```bash
-tmux new -s gpu-bot
-```
-
-tmux内でBotを起動します。
+crontabを開きます。
 
 ```bash
-cd /path/to/slack_gpu_bot
-source .venv/bin/activate
-set +x
-source .env
-python gpu_bot.py
+crontab -e
 ```
 
-Botを動かしたままtmuxから抜けるには、`Ctrl+B`を押して離し、その後`D`を押します。この操作をデタッチと呼びます。`Ctrl+C`はBotを終了させるため、デタッチ時には押さないでください。
+初回にエディタの選択画面が表示された場合は、`1`または`Enter`でnanoを選択します。末尾へ次の1行を追加し、`/path/to/slack_gpu_bot`は実際の絶対パスへ置き換えます。
 
-tmuxの一覧を確認します。
+```cron
+@reboot sleep 30 && /bin/bash -lc 'cd /path/to/slack_gpu_bot && source .env && export PYTHONUNBUFFERED=1 && exec .venv/bin/python gpu_bot.py' >> /path/to/slack_gpu_bot/gpu-bot.log 2>&1
+```
+
+nanoでは`Ctrl+O`、`Enter`、`Ctrl+X`の順に押して保存します。登録内容を確認します。
 
 ```bash
-tmux ls
+crontab -l
 ```
 
-後からBotの画面へ戻ります。
+この設定は、サーバー起動から30秒待ってネットワークの準備時間を確保し、`.env`を読み込んでBotを起動します。標準出力とエラーは`gpu-bot.log`へ保存されます。SSH接続を切ってもcrontabの設定と、cronが起動したBotは維持されます。
+
+### 再起動せずに設定を確認する
+
+`@reboot`の発火自体は再起動なしでは確認できませんが、cronと同等の最小環境でパス、環境変数、Pythonモジュールを確認できます。
 
 ```bash
-tmux attach -t gpu-bot
+env -i HOME="$HOME" PATH=/usr/bin:/bin \
+  /bin/bash -lc '
+    cd /path/to/slack_gpu_bot &&
+    source .env &&
+    test -n "$SLACK_BOT_TOKEN" &&
+    test -n "$SLACK_APP_TOKEN" &&
+    test -x .venv/bin/python &&
+    .venv/bin/python -c "import gpu_bot; print(\"cron environment OK\")"
+  '
 ```
 
-Botを終了する場合はtmuxへ戻り、`Ctrl+C`を押します。
+`cron environment OK`と表示されれば、起動コマンドに必要な環境は読み込めています。
 
-サーバー自体が再起動するとtmuxも終了するため、Botを再度起動する必要があります。
+### 今すぐnohupで起動する
+
+`@reboot`は登録直後には実行されません。現在手動で動かしているBotを停止した後、現在分だけ`nohup`で起動すると、次回再起動までSSH接続を切っても動作を維持できます。
+
+最初に既存のBotを`Ctrl+C`で停止し、二重起動していないことを確認します。
+
+```bash
+pgrep -af gpu_bot.py
+```
+
+何も表示されなければ起動します。
+
+```bash
+nohup /bin/bash -lc \
+  'cd /path/to/slack_gpu_bot && source .env && export PYTHONUNBUFFERED=1 && exec .venv/bin/python gpu_bot.py' \
+  >> /path/to/slack_gpu_bot/gpu-bot.log 2>&1 < /dev/null &
+```
+
+起動状態とログを確認します。
+
+```bash
+pgrep -af gpu_bot.py
+tail -n 100 /path/to/slack_gpu_bot/gpu-bot.log
+```
+
+現在から次回再起動までは`nohup`で起動したBotが動き、次回再起動後はcronが起動します。再起動後に手動コマンドから重ねて起動しないでください。
+
+cronの`@reboot`はサーバー起動時に1回実行する設定です。起動後にBotだけが異常終了しても自動再起動しません。
 
 ## GPU表示の見方
 
@@ -351,7 +386,7 @@ python -m pip install -r requirements.txt
 
 ### `環境変数 ... が設定されていません`
 
-Botと同じターミナルまたはtmux内で`.env`を読み込みます。
+手動起動ではBotと同じターミナルで`.env`を読み込みます。nohupとcronでは起動行に`source .env`が含まれているか確認します。
 
 ```bash
 source .env
@@ -389,9 +424,13 @@ source .env
 
 別ユーザーのPID情報を参照できない環境や、`nvidia-smi`のCompute Appsに現れない処理では、利用者を取得できない場合があります。GPU使用率とメモリ量はそのまま表示されます。
 
-### tmuxへ入ると以前の画面が表示される
+### 再起動後にcronからBotが起動しない
 
-tmuxは以前の画面を保存しています。`GNU nano`が表示された場合は`Ctrl+X`でnanoを閉じます。Botの起動メッセージが表示されていればBotは動作中です。tmuxから抜ける場合は`Ctrl+B`、`D`の順に操作します。
+- `crontab -l`に`@reboot`行が登録されているか確認します。
+- crontab内のBotディレクトリが絶対パスになっているか確認します。
+- `.env`と`.venv/bin/python`が存在するか確認します。
+- `pgrep -af gpu_bot.py`でプロセスを確認します。
+- `gpu-bot.log`に出力されたエラーを確認します。
 
 ## 制限事項
 
@@ -399,4 +438,5 @@ tmuxは以前の画面を保存しています。`GNU nano`が表示された場
 - `nvidia-smi`に表示されない処理は検出できません。
 - CPUのみを使う処理は表示しません。
 - SSH接続に失敗したサーバーは、GPU情報を取得できなかった旨だけを表示します。
+- cronの`@reboot`だけでは、Botが異常終了した場合の自動再起動は行いません。
 - Botを停止している間はSlackへ回答できません。
