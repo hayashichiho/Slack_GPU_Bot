@@ -10,6 +10,7 @@ import os
 import re
 import socket
 import subprocess
+import ast
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -160,13 +161,25 @@ def read_gpu_status(server: Server) -> list[GPU]:
         )
     except subprocess.CalledProcessError:
         process_rows = []
+    
+    try:
+        exclude_processes_str = os.environ.get("EXCLUDE_PROCESSES", "[]")
+        exclude_processes_list = ast.literal_eval(exclude_processes_str)
+    except (ValueError, SyntaxError):
+        print("Warning: EXCLUDE_PROCESSES environment variable is not a valid list. Ignoring.")
+        exclude_processes_list = []
 
     for row in process_rows:
         if len(row) != 2:
             continue
         gpu_uuid, pid = row
         gpu = by_uuid.get(gpu_uuid)
-        user = linux_user_and_command_for_pid(pid, server)
+        user, command = linux_user_and_command_for_pid(pid, server)
+        if user and command:
+            for exclude_user, exclude_command in exclude_processes_list:
+                if user == exclude_user and command == exclude_command:
+                    user = None
+                    break
         if gpu is not None and user:
             gpu.users.add(user)
 
