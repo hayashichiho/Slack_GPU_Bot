@@ -10,6 +10,7 @@ import os
 import re
 import socket
 import subprocess
+import ast
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -104,13 +105,19 @@ def parse_csv(text: str) -> list[list[str]]:
     ]
 
 
-def linux_user_for_pid(pid: str, server: Server) -> str | None:
-    """Resolve a process ID to its Linux user without exposing command lines."""
+def linux_user_and_command_for_pid(pid: str, server: Server) -> tuple[str, str] | None:
+    """Resolve a process ID to its Linux user and command without exposing command lines."""
     try:
-        user = run_server_command(["ps", "-o", "user=", "-p", pid], server).strip()
-        return user or None
+        line = run_server_command(
+            ["ps", "-ww", "-o", "user:32=,command=", "-p", pid], server
+        ).strip()   
     except (subprocess.SubprocessError, OSError):
-        return None
+        return None, None
+    
+    if not line:
+        return None, None
+    user, command = line.split(None, 1)
+    return user, command
 
 
 def read_gpu_status(server: Server) -> list[GPU]:
@@ -154,13 +161,25 @@ def read_gpu_status(server: Server) -> list[GPU]:
         )
     except subprocess.CalledProcessError:
         process_rows = []
+    
+    try:
+        exclude_processes_str = os.environ.get("EXCLUDE_PROCESSES", "[]")
+        exclude_processes_list = ast.literal_eval(exclude_processes_str)
+    except (ValueError, SyntaxError):
+        print("Warning: EXCLUDE_PROCESSES environment variable is not a valid list. Ignoring.")
+        exclude_processes_list = []
 
     for row in process_rows:
         if len(row) != 2:
             continue
         gpu_uuid, pid = row
         gpu = by_uuid.get(gpu_uuid)
-        user = linux_user_for_pid(pid, server)
+        user, command = linux_user_and_command_for_pid(pid, server)
+        if user and command:
+            for exclude_user, exclude_command in exclude_processes_list:
+                if user == exclude_user and command == exclude_command:
+                    user = None
+                    break
         if gpu is not None and user:
             gpu.users.add(user)
 
