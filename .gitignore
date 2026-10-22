@@ -270,3 +270,6 @@ pyrightconfig.json
 *.jpeg
 *.mp4
 *.mp3
+
+# Local GPU notification subscriptions
+gpu-notifications.sqlite3*
