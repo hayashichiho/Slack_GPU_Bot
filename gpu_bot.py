@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import csv
 import io
 import logging
@@ -10,7 +11,6 @@ import os
 import re
 import socket
 import subprocess
-import ast
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -98,11 +98,7 @@ def configured_servers() -> list[Server]:
 def parse_csv(text: str) -> list[list[str]]:
     if not text:
         return []
-    return [
-        [value.strip() for value in row]
-        for row in csv.reader(io.StringIO(text))
-        if row
-    ]
+    return [[value.strip() for value in row] for row in csv.reader(io.StringIO(text)) if row]
 
 
 def linux_user_and_command_for_pid(pid: str, server: Server) -> tuple[str, str] | None:
@@ -110,10 +106,10 @@ def linux_user_and_command_for_pid(pid: str, server: Server) -> tuple[str, str] 
     try:
         line = run_server_command(
             ["ps", "-ww", "-o", "user:32=,command=", "-p", pid], server
-        ).strip()   
+        ).strip()
     except (subprocess.SubprocessError, OSError):
         return None, None
-    
+
     if not line:
         return None, None
     user, command = line.split(None, 1)
@@ -161,7 +157,7 @@ def read_gpu_status(server: Server) -> list[GPU]:
         )
     except subprocess.CalledProcessError:
         process_rows = []
-    
+
     try:
         exclude_processes_str = os.environ.get("EXCLUDE_PROCESSES", "[]")
         exclude_processes_list = ast.literal_eval(exclude_processes_str)
@@ -255,13 +251,6 @@ def send_gpu_status(say, logger, *, thread_ts: str | None = None) -> None:
 
 def build_home_view(status_text: str | None = None) -> dict[str, Any]:
     blocks = [
-        {
-            "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": "GPUサーバー状況",
-            },
-        },
         {
             "type": "actions",
             "elements": [
